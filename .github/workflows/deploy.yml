@@ -1,0 +1,124 @@
+name: CI/CD - Build, Test & Deploy
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  PROJECT_ID: my-fastapi-project          # ← 替換為你的 GCP 專案 ID
+  REGION: asia-east1
+  WIF_PROVIDER: 'projects/123456789/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
+                                           # ← 替換成 Part 1 步驟 1.4 取得的完整路徑
+  SA_EMAIL: 'github-actions-sa@my-fastapi-project.iam.gserviceaccount.com'
+                                           # ← 替換為你的 Service Account email
+
+jobs:
+  # ============================================================
+  # Job 1: CI — 測試（所有分支、所有 PR 都跑）
+  # ============================================================
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: pytest tests/ -v
+
+  # ============================================================
+  # Job 2: CD — 部署 DEV（push to develop 才執行）
+  # ============================================================
+  deploy-dev:
+    name: Deploy to DEV
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.SA_EMAIL }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Authorize Docker push
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Deploy to DEV
+        run: |
+          gcloud builds submit \
+            --config=environments/cloudbuild.dev.yaml \
+            --substitutions=SHORT_SHA=$(echo $GITHUB_SHA | cut -c1-7) \
+            --region=${{ env.REGION }}
+
+      - name: Show DEV URL
+        run: |
+          echo "DEV service URL:"
+          gcloud run services describe fastapi-service-dev \
+            --region=${{ env.REGION }} \
+            --format="value(status.url)"
+
+  # ============================================================
+  # Job 3: CD — 部署 PROD（push to main 才執行）
+  # ============================================================
+  deploy-prod:
+    name: Deploy to PROD
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.SA_EMAIL }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Authorize Docker push
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Deploy to PROD
+        run: |
+          gcloud builds submit \
+            --config=environments/cloudbuild.prod.yaml \
+            --substitutions=SHORT_SHA=$(echo $GITHUB_SHA | cut -c1-7) \
+            --region=${{ env.REGION }}
+
+      - name: Show PROD URL
+        run: |
+          echo "PROD service URL:"
+          gcloud run services describe fastapi-service-prod \
+            --region=${{ env.REGION }} \
+            --format="value(status.url)"
